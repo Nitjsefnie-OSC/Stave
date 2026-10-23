@@ -1,0 +1,178 @@
+# Probe workflow for the Nitjsefnie-OSC fork of Stave (issue 2032 support).
+#
+# workflow_dispatch only, one `mode` per run, and an unlisted mode fails loudly.
+# Lives on the fork's default branch; never part of an upstream contribution.
+#
+#   measure   — run tests/firstplay-measure.spec.ts (from `probe_ref`) against
+#               each ref in `refs` (space-separated) and report the latency
+#               from the first Ctrl+Enter to the transport reporting playing.
+#   stability — run the repeated-Ctrl+Enter test `repeats` times on
+#               `target_ref`, one worker. Green means it no longer coins-tosses.
+#   mutant    — plant the #180 toggle mutant on `target_ref` (a second
+#               Ctrl+Enter stops playback) and require the repeated-Ctrl+Enter
+#               test to go RED. A surviving mutant fails this run.
+
+name: OSC ADV firstplay
+
+on:
+  workflow_dispatch:
+    inputs:
+      mode:
+        description: "measure | stability | mutant"
+        required: true
+        type: string
+      target_ref:
+        description: "measure: the newer ref. stability/mutant: the ref under test"
+        required: true
+        type: string
+      old_ref:
+        description: "measure: the older ref to compare against"
+        required: false
+        type: string
+      probe_ref:
+        description: "measure: ref carrying packages/app/tests/firstplay-measure.spec.ts"
+        required: false
+        type: string
+      repeats:
+        description: "stability: repeat count (default 10)"
+        required: false
+        type: string
+
+permissions:
+  contents: read
+
+jobs:
+  measure:
+    if: inputs.mode == 'measure'
+    name: measure ${{ matrix.ref }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    strategy:
+      fail-fast: false
+      matrix:
+        ref: [${{ inputs.target_ref }}, ${{ inputs.old_ref }}]
+    steps:
+      - name: Checkout ${{ matrix.ref }}
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ matrix.ref }}
+          fetch-depth: 0
+
+      - name: Checkout probe spec from ${{ inputs.probe_ref }}
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ inputs.probe_ref }}
+          fetch-depth: 1
+          path: probe
+
+      - name: Copy probe spec in
+        run: |
+          cp probe/packages/app/tests/firstplay-measure.spec.ts packages/app/tests/firstplay-measure.spec.ts
+          rm -rf probe
+
+      - name: Provenance
+        run: |
+          echo "Measured tree: $(git rev-parse HEAD) (resolved from '${{ matrix.ref }}')"
+
+      - uses: pnpm/action-setup@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24
+          cache: pnpm
+
+      - run: pnpm install --frozen-lockfile
+
+      - name: Build
+        run: pnpm turbo run build --filter=@stave/app
+
+      - name: Install Playwright Chromium
+        run: pnpm --filter @stave/app exec playwright install --with-deps chromium
+
+      - name: Measure first-play latency
+        env:
+          PLAY_MS_FILE: ${{ github.workspace }}/play-ms.txt
+        run: pnpm --filter @stave/app exec playwright test tests/firstplay-measure.spec.ts --project=chromium --workers=1
+
+      - name: Report
+        env:
+          PLAY_MS_FILE: ${{ github.workspace }}/play-ms.txt
+        run: |
+          echo "## first-play latency — ${{ matrix.ref }}" >> "$GITHUB_STEP_SUMMARY"
+          echo '```' >> "$GITHUB_STEP_SUMMARY"
+          sort -n "$PLAY_MS_FILE" >> "$GITHUB_STEP_SUMMARY"
+          echo '```' >> "$GITHUB_STEP_SUMMARY"
+          awk '{s+=$1; n++} END {if (n>0) printf "n=%d mean=%.0fms min=%dms max=%dms\n", n, s/n, m, M}' m="$(sort -n "$PLAY_MS_FILE" | head -1)" M="$(sort -n "$PLAY_MS_FILE" | tail -1)" "$PLAY_MS_FILE" >> "$GITHUB_STEP_SUMMARY"
+
+  check:
+    if: inputs.mode == 'stability' || inputs.mode == 'mutant'
+    name: ${{ inputs.mode }} on ${{ inputs.target_ref }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    steps:
+      - name: Checkout target_ref
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ inputs.target_ref }}
+          fetch-depth: 0
+
+      - name: Plant the #180 toggle mutant (mutant mode only)
+        if: inputs.mode == 'mutant'
+        run: |
+          python3 - <<'PY'
+          from pathlib import Path
+          p = Path('packages/editor/src/workspace/EditorView.tsx')
+          s = p.read_text()
+          original = "        run: () => onPlayRef.current?.(),"
+          mutant = """        run: () => {
+            const w = window as unknown as { __staveEvalPresses?: number }
+            w.__staveEvalPresses = (w.__staveEvalPresses ?? 0) + 1
+            if ((w.__staveEvalPresses ?? 0) % 2 === 0) {
+              onStopRef.current?.()
+              return
+            }
+            onPlayRef.current?.()
+          },"""
+          assert s.count(original) == 1, f"plant site count {s.count(original)} != 1"
+          p.write_text(s.replace(original, mutant))
+          print("planted toggle mutant at", p)
+          PY
+
+      - name: Provenance
+        run: |
+          echo "Tested commit: $(git rev-parse HEAD) (resolved from target_ref '${{ inputs.target_ref }}')"
+          git status --short
+
+      - uses: pnpm/action-setup@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24
+          cache: pnpm
+
+      - run: pnpm install --frozen-lockfile
+
+      - name: Build
+        run: pnpm turbo run build --filter=@stave/app
+
+      - name: Install Playwright Chromium
+        run: pnpm --filter @stave/app exec playwright install --with-deps chromium
+
+      - name: Stability — repeated-Ctrl+Enter test alone, one worker
+        if: inputs.mode == 'stability'
+        run: pnpm --filter @stave/app exec playwright test tests/getting-started-walkthrough.spec.ts --project=chromium --workers=1 -g "never stops" --repeat-each=${{ inputs.repeats || 10 }}
+
+      - name: Mutant — repeated-Ctrl+Enter test must go red
+        if: inputs.mode == 'mutant'
+        run: |
+          set +e
+          pnpm --filter @stave/app exec playwright test tests/getting-started-walkthrough.spec.ts --project=chromium --workers=1 -g "never stops" > mutant-run.log 2>&1
+          code=$?
+          set -e
+          tail -20 mutant-run.log || true
+          if [ "$code" -eq 0 ]; then
+            echo "::error::MUTANT SURVIVED — the spec stayed green while a second Ctrl+Enter stops playback"
+            exit 1
+          fi
+          echo "MUTANT RED as expected (playwright exit $code)"
+          echo "MUTANT_RED=true" >> "$GITHUB_ENV"

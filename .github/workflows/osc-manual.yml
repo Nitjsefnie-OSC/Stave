@@ -1,0 +1,54 @@
+# Manual CI wrapper for the Nitjsefnie-OSC fork of Stave.
+#
+# Generic on purpose: it takes any ref in this repository via `target_ref` and
+# runs the repository's own PR-depth gate (build + both unit suites, mirroring
+# .github/workflows/ci.yml's pull_request job) on Linux. No per-branch logic
+# belongs in this file.
+
+name: OSC Manual CI
+
+on:
+  workflow_dispatch:
+    inputs:
+      target_ref:
+        description: "Branch, tag or SHA in this repository to test"
+        required: true
+        type: string
+
+permissions:
+  contents: read
+
+jobs:
+  linux-unit-gate:
+    name: Linux — build + unit suites (PR depth)
+    runs-on: ubuntu-latest
+    timeout-minutes: 40
+    steps:
+      - name: Checkout target_ref
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ inputs.target_ref }}
+          fetch-depth: 0
+
+      - name: Provenance
+        run: |
+          echo "Tested commit: $(git rev-parse HEAD) (resolved from target_ref '${{ inputs.target_ref }}')"
+          git log -1 --format='%H%n%an%n%s'
+
+      - uses: pnpm/action-setup@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24
+          cache: pnpm
+
+      - run: pnpm install --frozen-lockfile
+
+      - name: Build
+        run: pnpm turbo run build --filter=@stave/app
+
+      - name: Editor unit tests
+        run: pnpm --filter @stave/editor test
+
+      - name: App unit tests (without the corpus)
+        run: pnpm --filter @stave/app run test --exclude 'tests/parity-corpus/**'
