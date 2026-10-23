@@ -50,7 +50,9 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        ref: [${{ inputs.target_ref }}, ${{ inputs.old_ref }}]
+        # Quoted: an unquoted `${{ }}` in a flow sequence is invalid YAML and
+        # GitHub silently registers the file with no triggers at all.
+        ref: ["${{ inputs.target_ref }}", "${{ inputs.old_ref }}"]
     steps:
       - name: Checkout ${{ matrix.ref }}
         uses: actions/checkout@v4
