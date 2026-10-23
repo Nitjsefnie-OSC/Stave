@@ -105,6 +105,10 @@ jobs:
           sort -n "$PLAY_MS_FILE" >> "$GITHUB_STEP_SUMMARY"
           echo '```' >> "$GITHUB_STEP_SUMMARY"
           awk '{s+=$1; n++} END {if (n>0) printf "n=%d mean=%.0fms min=%dms max=%dms\n", n, s/n, m, M}' m="$(sort -n "$PLAY_MS_FILE" | head -1)" M="$(sort -n "$PLAY_MS_FILE" | tail -1)" "$PLAY_MS_FILE" >> "$GITHUB_STEP_SUMMARY"
+          # The step summary is UI-only; repeat the numbers on stdout so the
+          # log itself carries them.
+          echo "latencies-ms $(sort -n "$PLAY_MS_FILE" | tr '\n' ' ')"
+          awk '{s+=$1; n++} END {if (n>0) printf "n=%d mean=%.0fms min=%dms max=%dms\n", n, s/n, m, M}' m="$(sort -n "$PLAY_MS_FILE" | head -1)" M="$(sort -n "$PLAY_MS_FILE" | tail -1)" "$PLAY_MS_FILE"
 
   check:
     if: inputs.mode == 'stability' || inputs.mode == 'mutant'
